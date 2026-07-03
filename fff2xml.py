@@ -14,10 +14,33 @@ from QueryLink import QueryLink
 parser = ArgumentParser()
 parser.add_argument("-f", "--filename", dest="filename", help="the file to process")
 parser.add_argument("-t", "--target", dest="target", help="the target file")
-parser.add_argument("-d", "--debug", dest="debug", help="the target file", action='store_true')
+parser.add_argument("-a", "--json-file", dest="json_file", help="the JSON file for debugging (default is <FILENAME>.json))")
+parser.add_argument("-s", "--solr-index", default="ukt", dest="solr_index", help="the solr index")
+parser.add_argument("-d", "--debug", dest="debug", help="debug content into a JSON file", action='store_true')
+parser.add_argument("-x", "--delete-records", dest="delete_records", help="delete records before indexing", action='store_true')
+
+args = parser.parse_args()
+if args.debug:
+    if args.json_file:
+        json_file = args.json_file
+    else:
+        json_file = re.sub(r'FFF$', 'json', args.filename)
+
+print(json_file)
+
+solr = pysolr.Solr('http://localhost:8983/solr/' + args.solr_index, always_commit=False, timeout=10)
+
+if args.delete_records:
+    solr.delete(q='*:*')
+    record_id = 0
+else:
+    res = solr.search('*:*', **{'fl': 'id_i', 'rows': 1, 'sort': 'id_i desc'})
+    record_id = res.docs[0]['id_i']
+
+print(record_id)
 
 header = re.compile(r'^<RD:"H(\d)"(,CH)?>')
-rd = re.compile(r'^<RD(:(Leiras|"S1"|"S2"))?(,CH)?>')
+rd = re.compile(r'^<RD(:(Leiras|"S1"|"S2"|"S3"|"S4"))?(,CH)?>')
 field_items = [
     '<FD:"(01Azonosito)">(.*?)</FD:"01Azonosito">',
     '<FD:"(01Azonosito_sorszam)">(.*?)</FD:"01Azonosito_sorszam">',
@@ -33,8 +56,10 @@ field_items = [
     '<FD:"(11Allapot)">(.*?)</FD:"11Allapot">',
     '<FD:"(12Targyszo)">(.*?)</FD:"12Targyszo">',
     
+    '<FD:"(13Tartalom)">(.*?)</FD:"13Tartalom">',
     '<FD:"(14Tartalom)">(.*?)</FD:"14Tartalom">',
     '<FD:"(14Facsimile)">(.*?)</FD:"14Facsimile">',
+    '<FD:"(14Oldal)">(.*?)</FD:"14Oldal">',
     '<FD:"(15Oldal)">(.*?)</FD:"15Oldal">',
     '<FD:"(15Megjegyzes)">(.*?)</FD:"15Megjegyzes">',
     '<FD:"(20Scriptor)">(.*?)</FD:"20Scriptor">',
@@ -52,10 +77,14 @@ field_items = [
     '<FD:"(T01xExplicit)">(.*?)</FD:"T01xExplicit">',
     '<FD:"(T01xNev)">(.*?)</FD:"T01xNev">',
     '<FD:"(T02xrovidites)">(.*?)</FD:"T02xrovidites">',
-    
+    '<FD:(xErrata)>(.*?)</FD:xErrata>',
+
     '<<(kép)>(.*?)<</kép>',
     '<(BH)>(.*?)<EH>', 
 ]
+
+tag_pattern = re.compile(r'<(/?FD:.+?)>')
+
 
 field_to_solr = {
     '01Azonosito': 'identifier',
@@ -71,8 +100,10 @@ field_to_solr = {
     '10Birtokos': 'possessor',
     '11Allapot': 'state',
     '12Targyszo': 'keyword',
+    '13Tartalom': 'toc',
     '14Tartalom': 'toc',
     '14Facsimile': 'facsimile',
+    '14Oldal': 'pages',
     '15Oldal': 'pages',
     '15Megjegyzes': 'note',
     '20Scriptor': 'scriptor',
@@ -89,22 +120,29 @@ field_to_solr = {
     'T01xExplicit': 'explicit',
     'T01xNev': 'person',
     'T02xrovidites': 'abbreviation',
+    'xErrata': 'errata',
     'kép': 'caption',
+
     'BH': 'title',
 }
 
 removeable_items = [
-    '<PT:7>', '<PT:8>', '<PT:9>', '<PT:10>', '<PT:11>', '<PT:12>', '<PT>', 
+    '<PT:6>', '<PT:7>', '<PT:8>', '<PT:9>', '<PT:10>', '<PT:11>', '<PT:12>', '<PT>', 
     r'<KN\+>', '<BP:9p>',
     '<PS:torzs>', '<PS:vers>', '<PS:Leiras>', '<PS:Normal>', '<PS:"sorkoz_elotte">',
         '<PS:"bal_margo">', '<PS:"sorkoz_elotte_utanna">', '<PS:"besch2a">', '<PS:"sorkoz_utanna">',
         '<PS:"normal_bekezdes">', '<PS:kozepre>', '<PS:init>', '<PS:"Szövegtörzs">', '<PS:"besch2">',
-        '<PS:"besch1">', '<PS:"leiras_biblhung3">', '<PS:esztKategoriak>', '<PS:"Lábjegyzetszöveg">', 
-        r'<JD:"patak-\d+">', r'<JD:"raday-\d+">', r'<JD:"pannonhalma-\d+[abc]?">',
-    '<JU:RT>', '<JU:CN>', '<JU:FL>',
-    '<FC:DC>', '<FC>', '<BC:DC>', '<BC>',
+        '<PS:"besch1">', '<PS:"leiras_biblhung3">', '<PS:esztKategoriak>', '<PS:"Lábjegyzetszöveg">',
+        r'<PS:(fejresz|Birtokos|Formatum|cimke)>', r'<PS:"(fuggo-dupla)">',
+    r'<JD:"patak-\d+">', r'<JD:"raday-\d+">', r'<JD:"pannonhalma-\d+[abc]?">', r'<JD:"CL-?\d+">',
+      r'<JD:"CL-\d+-\d+">', r'<JD:"CL-MNY\. \d+">', r'<JD:"DH\d+">', r'<JD:"DH\d+-\d+">', 
+      r'<JD:"OH\d+">', r'<JD:"FH\d+">', r'<JD:"FH\d+-\d+">',
+      r'<JD:"QH\d+">', r'<JD:"QH\d+-\d+\.?">',
+    '<JU:RT>', '<JU:CN>', '<JU:FL>', '<JU:LF>',
+    '<FC:DC>', '<FC>', '<BC:DC>', '<BC>', '<FC:128,0,0>',
     # r'<IT\+>', '<IT>', 
     '<IT->', r'<BD\+>', '<BD->', '<BD>',
+    '<PB>',
     '<FD:fieldname>', '</FD:fieldname>',
     # '<HR>',
     '<BK:"[^"]+">',
@@ -114,7 +152,8 @@ removeable_items = [
     '<JD:"csapodi_budai_pic[1234]">', '<JD:"vizkelety_mittelalterliche_iii_pic26">',
     '<JD:"vizkelety_mittelalterliche_.*?">',
     # TODO: char replace
-    '<FT:"Times New Roman CE",SR>', '<FT:"Times New Roman",SR>', '<FT:Symbol,SR,SY>', '<FT:Arial,SN>', '<FT:Symbol>', '<FT>', 
+    '<FT:"Times New Roman CE",SR>', '<FT:"Times New Roman",SR>', '<FT:"Times New Roman,SR">',
+      '<FT:"Times New Roman">', '<FT:Symbol,SR,SY>', '<FT:Arial,SN>', '<FT:Symbol>', '<FT>', 
     '<TS:[^>]+>', 
     # tables
     # '<TA:[^>]+>', '<RO>',
@@ -147,25 +186,10 @@ single_query_items = [
 ]
 
 popup = re.compile(r'<PW:Popup[^>]+>(.*?)<LT>(.*?)<EL>')
-query_links = {
-    'c':   re.compile(r'^\[Contents ([^\]]+)\]$'),
-    'cf':  re.compile(r'^\[Contents ([^\]]+)\]\[Field ([^\]]+)\]$'),
-    'cl':  re.compile(r'^\[Contents ([^\]]+)\]\[Level ([^\]]+)\]$'),
-    'clf': re.compile(r'^\[Contents ([^\]]+)\]\[Level ([^\]]+)\]\[Field ([^\]]+)\]$'),
-    'clt': re.compile(r'^\[Contents ([^\]]+)\]\[Level ([^\]]+)\] ([^\]]+)$'),
-    'l':   re.compile(r'^\[Level ([^\]]+)\]$'),
-    'lt':  re.compile(r'^\[Level ([^\]]+)\] ([^\]]+)$'),
-    'f':   re.compile(r'^\[Field ([^\]]+)\]$'),
-}
-cs = ['c', 'cf', 'cl', 'clf', 'clt']
 repeated_fields = re.compile(r'<(f:[^<>]+)><\1>(.*?)</\1></\1>')
 
-contents = Counter()
-content_paths = None
 
-solr = pysolr.Solr('http://localhost:8983/solr/ukt', always_commit=False, timeout=10)
-solr.delete(q='*:*')
-record_id = 0
+content_paths = None
 
 tokenized_fields = list(field_to_solr.values())
 tokenized_fields.append('path')
@@ -207,7 +231,7 @@ def save_data(data, path):
                 data[key] = list(data[key])
 
         if args.debug:
-            with open("test.txt", "a") as myfile:
+            with open(json_file, "a") as myfile:
                 myfile.write(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
 
         solr.add(data)
@@ -232,19 +256,42 @@ def clean_value(value):
     value = value.strip()
     return value
 
-args = parser.parse_args()
+def fix_tags(text, linenr):
+    tags = tag_pattern.findall(text)
+    c = {}
+    for tag in tags:
+        if tag[0:1] == '/':
+            tag = tag[1:] 
+            if tag in c:
+                c[tag] -= 1
+            else:
+                print(f'{linenr}) error: unknown open {tag}')
+        else:
+            if tag in c:
+                c[tag] += 1
+            else:
+                c[tag] = 1
+
+    for tag, count in c.items():
+        if count > 0:
+            # print(f"{linenr}) {count} open '{tag}' tag")
+            text += '</' + tag + '>'
+        if count < 0:
+            print(f"{linenr}) {abs(count)} unnecessary closed '{tag}' tag")
+
+    return text
 
 def main():
     if args.debug:
-        if os.path.exists("test.txt"):
-            os.remove("test.txt")
+        if os.path.exists(json_file):
+            os.remove(json_file)
 
     removeables = compile_regexes(removeable_items)
     fields = compile_regexes(field_items)
     queries = compile_regexes(query_items)
     single_queries = compile_regexes(single_query_items)
     error_count = 0
-    ql = QueryLink(field_to_solr)
+    ql = QueryLink(field_to_solr, args.delete_records)
     # content_paths = read_ql()
     # print(content_paths)
 
@@ -253,7 +300,9 @@ def main():
         old_level = None
         data = {}
         path = []
+        linenr = 0
         while line := file.readline():
+            linenr += 1
             line = line.rstrip()
             in_level = False
             m = header.match(line)
@@ -283,7 +332,7 @@ def main():
                     # print('after', get_path(path))
                     pass
                 else:
-                    print(f'level: {level}, old_level: {old_level}')
+                    print(f'at line {linenr}) level: {level}, old_level: {old_level}')
                     # print(line)
                 old_level = level
                 line = re.sub(r"^<RD[^>]*>", "", line)
@@ -299,6 +348,8 @@ def main():
 
             for re_from, to in table_items.items():
                 line = re_from.sub(to, line)
+
+            line = fix_tags(line, linenr)
 
             for field in fields:
                 # print('check', field)
@@ -340,6 +391,7 @@ def main():
             line = re.sub('<TB>', '   ', line)
             line = re.sub('<(CR|HR)>', '<br>', line)
             line = re.sub(r'\s+', ' ', line)
+            line = re.sub(r'<<([^<>]+)>', r'〈\1〉', line)
 
 
             if 'level' in data and 'title_ss' not in data:
@@ -347,20 +399,20 @@ def main():
             
             data['lines'].append(line)
 
-            if re.search(r'<[A-Z]', line):
+            m = re.search(r'(<[A-Z][^>]+>)', line)
+            if m:
                 error_count += 1
                 # pass
-                print('>', line)
+                if m.group(1) != '<FD:"13Tartalom">':
+                    print(f'line nr {linenr}) {m.group(1)}')
+                # print('>', line)
 
                 # if atr is not None:
     print(f'{error_count} lines has code')
     handle_data(data, path)
     solr.commit()
-
-    with open('ql.txt', 'w', encoding='UTF-8') as ql_file:
-        for key in contents.keys():
-            if key:
-                ql_file.write(key + '\n')
+    ql.save_contents()
+    print('DONE')
 
 
 if __name__ == '__main__':
